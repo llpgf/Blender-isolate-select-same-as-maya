@@ -1,4 +1,4 @@
-# Maya-Style Isolate Select (Local & Global)  
+# Maya-Style Isolate Select (Local & Global)  Only test on Blender 4.3
 
 ## Two Isolation Modes in One Addon  
 
