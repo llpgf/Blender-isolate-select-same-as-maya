@@ -43,7 +43,12 @@ class VIEW3D_OT_local_isolate(Operator):
     
     @classmethod
     def poll(cls, context):
-        return context.area.type == 'VIEW_3D'
+        # Check if feature is enabled in preferences
+        try:
+            prefs = context.preferences.addons[__name__].preferences
+            return context.area.type == 'VIEW_3D' and prefs.enable_local_isolate
+        except:
+            return context.area.type == 'VIEW_3D'
     
     def execute(self, context):
         mode = context.mode
@@ -248,7 +253,12 @@ class VIEW3D_OT_global_isolate(Operator):
     
     @classmethod
     def poll(cls, context):
-        return context.area.type == 'VIEW_3D'
+        # Check if feature is enabled in preferences
+        try:
+            prefs = context.preferences.addons[__name__].preferences
+            return context.area.type == 'VIEW_3D' and prefs.enable_global_isolate
+        except:
+            return context.area.type == 'VIEW_3D'
     
     def execute(self, context):
         mode = context.mode
@@ -488,6 +498,19 @@ class VIEW3D_OT_global_isolate(Operator):
 class IsolateSelectPreferences(AddonPreferences):
     bl_idname = __name__
     
+    # Enable/disable options
+    enable_local_isolate: BoolProperty(
+        name="Enable Local Isolation",
+        description="Enable or disable the local isolation feature",
+        default=True
+    )
+    
+    enable_global_isolate: BoolProperty(
+        name="Enable Global Isolation",
+        description="Enable or disable the global isolation feature",
+        default=True
+    )
+    
     # Local isolate hotkey settings
     local_key_type: EnumProperty(
         name="Hotkey",
@@ -591,9 +614,17 @@ class IsolateSelectPreferences(AddonPreferences):
     def draw(self, context):
         layout = self.layout
         
+        # Enable/disable options
+        box = layout.box()
+        box.label(text="Feature Settings:")
+        row = box.row()
+        row.prop(self, "enable_local_isolate")
+        row.prop(self, "enable_global_isolate")
+        
         # Local isolate hotkey settings
         box = layout.box()
         box.label(text="Local Isolate Hotkey Settings (isolates within current object):")
+        box.enabled = self.enable_local_isolate
         row = box.row()
         row.prop(self, "local_key_type")
         row = box.row()
@@ -604,6 +635,7 @@ class IsolateSelectPreferences(AddonPreferences):
         # Global isolate hotkey settings
         box = layout.box()
         box.label(text="Global Isolate Hotkey Settings (isolates and hides everything else):")
+        box.enabled = self.enable_global_isolate
         row = box.row()
         row.prop(self, "global_key_type")
         row = box.row()
@@ -642,10 +674,16 @@ class VIEW3D_PT_isolate_select(Panel):
     
     def draw(self, context):
         layout = self.layout
+        prefs = context.preferences.addons[__name__].preferences
         
         col = layout.column(align=True)
-        col.operator("view3d.local_isolate", text="Toggle Local Isolation", icon='HIDE_OFF')
-        col.operator("view3d.global_isolate", text="Toggle Global Isolation", icon='WORLD')
+        
+        # Only show enabled operators
+        if prefs.enable_local_isolate:
+            col.operator("view3d.local_isolate", text="Toggle Local Isolation", icon='HIDE_OFF')
+        
+        if prefs.enable_global_isolate:
+            col.operator("view3d.global_isolate", text="Toggle Global Isolation", icon='WORLD')
         
         # Show current state
         mode = context.mode
@@ -656,28 +694,36 @@ class VIEW3D_PT_isolate_select(Panel):
             # Convert mode to dictionary key
             mode_key = mode
             
-            # Show local isolation state
-            local_state = isolate_states['LOCAL'][mode_key]['active']
-            if local_state:
-                col.label(text="Local Isolation: Active", icon='CHECKMARK')
-            else:
-                col.label(text="Local Isolation: Inactive", icon='X')
-                
-            # Show global isolation state
-            global_state = isolate_states['GLOBAL'][mode_key]['active']
-            if global_state:
-                col.label(text="Global Isolation: Active", icon='CHECKMARK')
-            else:
-                col.label(text="Global Isolation: Inactive", icon='X')
+            # Show local isolation state if enabled
+            if prefs.enable_local_isolate:
+                local_state = isolate_states['LOCAL'][mode_key]['active']
+                if local_state:
+                    col.label(text="Local Isolation: Active", icon='CHECKMARK')
+                else:
+                    col.label(text="Local Isolation: Inactive", icon='X')
+                    
+            # Show global isolation state if enabled
+            if prefs.enable_global_isolate:
+                global_state = isolate_states['GLOBAL'][mode_key]['active']
+                if global_state:
+                    col.label(text="Global Isolation: Active", icon='CHECKMARK')
+                else:
+                    col.label(text="Global Isolation: Inactive", icon='X')
 
 #----------------------------------------------------------------------------------
 # MENU ITEMS
 #----------------------------------------------------------------------------------
 def draw_items(self, context):
     layout = self.layout
+    prefs = context.preferences.addons[__name__].preferences
+    
     layout.separator()
-    layout.operator("view3d.local_isolate", text="Toggle Local Isolation")
-    layout.operator("view3d.global_isolate", text="Toggle Global Isolation")
+    
+    if prefs.enable_local_isolate:
+        layout.operator("view3d.local_isolate", text="Toggle Local Isolation")
+    
+    if prefs.enable_global_isolate:
+        layout.operator("view3d.global_isolate", text="Toggle Global Isolation")
 
 #----------------------------------------------------------------------------------
 # KEYMAPS
@@ -695,29 +741,31 @@ def setup_keymaps():
         
         # Set up keymaps for all relevant modes
         for mode_name in ['Object Mode', 'Mesh', 'Pose', 'Armature']:
-            # Local isolate keymaps
-            km = kc.keymaps.new(name=mode_name)
-            kmi = km.keymap_items.new(
-                "view3d.local_isolate",
-                type=prefs.local_key_type,
-                value='PRESS',
-                shift=prefs.local_use_shift,
-                ctrl=prefs.local_use_ctrl,
-                alt=prefs.local_use_alt
-            )
-            addon_keymaps.append((km, kmi))
+            # Local isolate keymaps (only if enabled)
+            if prefs.enable_local_isolate:
+                km = kc.keymaps.new(name=mode_name)
+                kmi = km.keymap_items.new(
+                    "view3d.local_isolate",
+                    type=prefs.local_key_type,
+                    value='PRESS',
+                    shift=prefs.local_use_shift,
+                    ctrl=prefs.local_use_ctrl,
+                    alt=prefs.local_use_alt
+                )
+                addon_keymaps.append((km, kmi))
             
-            # Global isolate keymaps
-            km = kc.keymaps.new(name=mode_name)
-            kmi = km.keymap_items.new(
-                "view3d.global_isolate",
-                type=prefs.global_key_type,
-                value='PRESS',
-                shift=prefs.global_use_shift,
-                ctrl=prefs.global_use_ctrl,
-                alt=prefs.global_use_alt
-            )
-            addon_keymaps.append((km, kmi))
+            # Global isolate keymaps (only if enabled)
+            if prefs.enable_global_isolate:
+                km = kc.keymaps.new(name=mode_name)
+                kmi = km.keymap_items.new(
+                    "view3d.global_isolate",
+                    type=prefs.global_key_type,
+                    value='PRESS',
+                    shift=prefs.global_use_shift,
+                    ctrl=prefs.global_use_ctrl,
+                    alt=prefs.global_use_alt
+                )
+                addon_keymaps.append((km, kmi))
 
 #----------------------------------------------------------------------------------
 # REGISTRATION
