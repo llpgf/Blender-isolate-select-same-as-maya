@@ -17,20 +17,48 @@ from bpy.props import BoolProperty, EnumProperty
 isolate_states = {
     # Local isolation states
     'LOCAL': {
-        'OBJECT': {'active': False, 'hidden_objects': [], 'selected_objects': []},
-        'EDIT_MESH': {'active': False, 'selected_faces': [], 'selected_edges': [], 'selected_verts': []},
-        'POSE': {'active': False, 'selected_bones': []},
-        'EDIT_ARMATURE': {'active': False, 'selected_bones': []}
+        'active': False,  # Global active state across modes
+        'hidden_objects': [],  # Shared list of hidden objects across modes
+        'hidden_bones': [],    # Shared list of hidden bones across modes
+        'OBJECT': {'selected_objects': []},
+        'EDIT_MESH': {'selected_faces': [], 'selected_edges': [], 'selected_verts': []},
+        'POSE': {'selected_bones': []},
+        'EDIT_ARMATURE': {'selected_bones': []}
     },
     # Global isolation states
     'GLOBAL': {
-        'OBJECT': {'active': False, 'hidden_objects': [], 'selected_objects': []},
-        'EDIT_MESH': {'active': False, 'selected_faces': [], 'selected_edges': [], 
-                      'selected_verts': [], 'hidden_objects': []},
-        'POSE': {'active': False, 'selected_bones': [], 'hidden_objects': []},
-        'EDIT_ARMATURE': {'active': False, 'selected_bones': [], 'hidden_objects': []}
+        'active': False,  # Global active state across modes
+        'hidden_objects': [],  # Shared list of hidden objects across modes
+        'hidden_bones': [],    # Shared list of hidden bones across modes
+        'OBJECT': {'selected_objects': []},
+        'EDIT_MESH': {'selected_faces': [], 'selected_edges': [], 'selected_verts': []},
+        'POSE': {'selected_bones': []},
+        'EDIT_ARMATURE': {'selected_bones': []}
     }
 }
+
+def restore_unhidden_state(self, context, state):
+    """Helper function to restore all hidden states"""
+    # Restore hidden objects
+    for obj in state['hidden_objects'][:]:
+        try:
+            if obj.name in bpy.data.objects:
+                obj.hide_viewport = False
+                # If it's an armature, unhide all bones
+                if obj.type == 'ARMATURE':
+                    if obj.mode == 'POSE':
+                        for bone in obj.data.bones:
+                            bone.hide = False
+                    elif obj.mode == 'EDIT':
+                        for bone in obj.data.edit_bones:
+                            bone.hide = False
+        except ReferenceError:
+            state['hidden_objects'].remove(obj)
+    
+    # Clear states
+    state['hidden_objects'] = []
+    state['hidden_bones'] = []
+    state['active'] = False
 
 #----------------------------------------------------------------------------------
 # LOCAL ISOLATION OPERATOR
@@ -43,7 +71,6 @@ class VIEW3D_OT_local_isolate(Operator):
     
     @classmethod
     def poll(cls, context):
-        # Check if feature is enabled in preferences
         try:
             prefs = context.preferences.addons[__name__].preferences
             return context.area.type == 'VIEW_3D' and prefs.enable_local_isolate
@@ -52,20 +79,18 @@ class VIEW3D_OT_local_isolate(Operator):
     
     def execute(self, context):
         mode = context.mode
+        state = isolate_states['LOCAL']
+        mode_state = state[mode]
         
-        # OBJECT MODE
-        if mode == 'OBJECT':
-            state = isolate_states['LOCAL']['OBJECT']
-            
-            if not state['active']:
-                # Get selected objects
+        if not state['active']:
+            # OBJECT MODE
+            if mode == 'OBJECT':
                 selected = [obj for obj in context.selected_objects]
                 if not selected:
                     self.report({'WARNING'}, "No objects selected")
                     return {'CANCELLED'}
                 
-                # Store selected objects (for later restoration)
-                state['selected_objects'] = selected.copy()
+                mode_state['selected_objects'] = selected.copy()
                 
                 # Store and hide unselected objects
                 hidden = []
@@ -75,165 +100,139 @@ class VIEW3D_OT_local_isolate(Operator):
                         obj.hide_viewport = True
                 
                 state['hidden_objects'] = hidden
-                state['active'] = True
-                self.report({'INFO'}, "Local isolate mode enabled (Object Mode)")
-            
-            else:
-                # Remember current selection before revealing
-                last_selected = [obj for obj in context.selected_objects]
                 
-                # Clear selection
-                bpy.ops.object.select_all(action='DESELECT')
-                
-                # Restore hidden objects
-                for obj in state['hidden_objects']:
-                    obj.hide_viewport = False
-                
-                # Restore original selection
-                for obj in state['selected_objects']:
-                    if obj and obj.name in bpy.data.objects:
-                        obj.select_set(True)
-                
-                # Set active object if possible
-                if state['selected_objects'] and state['selected_objects'][0]:
-                    context.view_layer.objects.active = state['selected_objects'][0]
-                
-                state['hidden_objects'] = []
-                state['active'] = False
-                self.report({'INFO'}, "Local isolate mode disabled (Object Mode)")
-        
-        # EDIT MESH MODE
-        elif mode == 'EDIT_MESH':
-            state = isolate_states['LOCAL']['EDIT_MESH']
-            obj = context.edit_object
-            mesh = obj.data
-            
-            if not state['active']:
-                # Get the BMesh to access selection data
+            # EDIT MESH MODE
+            elif mode == 'EDIT_MESH':
+                obj = context.edit_object
+                mesh = obj.data
                 bm = bmesh.from_edit_mesh(mesh)
                 
-                # Store indices of selected elements based on current selection mode
-                state['selected_verts'] = [v.index for v in bm.verts if v.select]
-                state['selected_edges'] = [e.index for e in bm.edges if e.select]
-                state['selected_faces'] = [f.index for f in bm.faces if f.select]
+                mode_state['selected_verts'] = [v.index for v in bm.verts if v.select]
+                mode_state['selected_edges'] = [e.index for e in bm.edges if e.select]
+                mode_state['selected_faces'] = [f.index for f in bm.faces if f.select]
                 
-                # Hide unselected elements in current edit mesh
                 bpy.ops.mesh.hide(unselected=True)
-                state['active'] = True
-                self.report({'INFO'}, "Local isolate mode enabled (Edit Mode)")
-            
-            else:
-                # Reveal all hidden elements in current mesh
-                bpy.ops.mesh.reveal()
                 
-                # First deselect everything
-                bpy.ops.mesh.select_all(action='DESELECT')
-                
-                # Get the BMesh to restore selection
-                bm = bmesh.from_edit_mesh(mesh)
-                
-                # Restore selection based on component indices
-                # For vertices
-                if state['selected_verts']:
-                    for index in state['selected_verts']:
-                        if index < len(bm.verts):
-                            bm.verts[index].select = True
-                
-                # For edges
-                if state['selected_edges']:
-                    for index in state['selected_edges']:
-                        if index < len(bm.edges):
-                            bm.edges[index].select = True
-                
-                # For faces
-                if state['selected_faces']:
-                    for index in state['selected_faces']:
-                        if index < len(bm.faces):
-                            bm.faces[index].select = True
-                
-                # Update the edit mesh
-                bmesh.update_edit_mesh(mesh)
-                
-                state['active'] = False
-                self.report({'INFO'}, "Local isolate mode disabled (Edit Mode)")
-        
-        # POSE MODE
-        elif mode == 'POSE':
-            state = isolate_states['LOCAL']['POSE']
-            armature = context.object
-            
-            if not state['active']:
-                # Store selected bone names
+            # POSE MODE
+            elif mode == 'POSE':
+                armature = context.object
                 selected_bones = [bone.name for bone in armature.data.bones if bone.select]
                 if not selected_bones:
                     self.report({'WARNING'}, "No bones selected")
                     return {'CANCELLED'}
                 
-                state['selected_bones'] = selected_bones
+                mode_state['selected_bones'] = selected_bones
                 
-                # Hide unselected bones
+                # Store hidden bones state
+                hidden_bones = []
                 for bone in armature.data.bones:
                     if bone.name not in selected_bones:
+                        hidden_bones.append(bone.name)
                         bone.hide = True
                 
-                state['active'] = True
-                self.report({'INFO'}, "Local isolate mode enabled (Pose Mode)")
-            
-            else:
-                # Unhide all bones
-                for bone in armature.data.bones:
-                    bone.hide = False
-                
-                # Restore original bone selection
-                bpy.ops.pose.select_all(action='DESELECT')
-                for bone_name in state['selected_bones']:
-                    if bone_name in armature.data.bones:
-                        armature.data.bones[bone_name].select = True
-                
-                state['active'] = False
-                self.report({'INFO'}, "Local isolate mode disabled (Pose Mode)")
-        
-        # EDIT ARMATURE MODE
-        elif mode == 'EDIT_ARMATURE':
-            state = isolate_states['LOCAL']['EDIT_ARMATURE']
-            armature = context.object
-            
-            if not state['active']:
-                # Store selected bone names
+                state['hidden_bones'] = hidden_bones
+                        
+            # EDIT ARMATURE MODE
+            elif mode == 'EDIT_ARMATURE':
+                armature = context.object
                 selected_bones = [bone.name for bone in armature.data.edit_bones if bone.select]
                 if not selected_bones:
                     self.report({'WARNING'}, "No bones selected")
                     return {'CANCELLED'}
                 
-                state['selected_bones'] = selected_bones
+                mode_state['selected_bones'] = selected_bones
                 
-                # Hide unselected bones
+                # Store hidden bones state
+                hidden_bones = []
                 for bone in armature.data.edit_bones:
                     if bone.name not in selected_bones:
+                        hidden_bones.append(bone.name)
                         bone.hide = True
                 
-                state['active'] = True
-                self.report({'INFO'}, "Local isolate mode enabled (Armature Edit Mode)")
+                state['hidden_bones'] = hidden_bones
             
-            else:
-                # Unhide all bones
+            state['active'] = True
+            self.report({'INFO'}, f"Local isolate mode enabled ({mode})")
+            
+        else:
+            # Call helper function to restore all hidden states
+            restore_unhidden_state(self, context, state)
+            
+            # Restore mode-specific selections
+            if mode == 'OBJECT':
+                bpy.ops.object.select_all(action='DESELECT')
+                if 'selected_objects' in mode_state:
+                    for obj in mode_state['selected_objects'][:]:
+                        try:
+                            if obj and obj.name in bpy.data.objects:
+                                obj.select_set(True)
+                        except ReferenceError:
+                            mode_state['selected_objects'].remove(obj)
+                    
+                    if mode_state['selected_objects'] and len(mode_state['selected_objects']) > 0:
+                        try:
+                            if mode_state['selected_objects'][0].name in bpy.data.objects:
+                                context.view_layer.objects.active = mode_state['selected_objects'][0]
+                        except ReferenceError:
+                            pass
+            
+            elif mode == 'EDIT_MESH':
+                obj = context.edit_object
+                mesh = obj.data
+                
+                bpy.ops.mesh.reveal()
+                bpy.ops.mesh.select_all(action='DESELECT')
+                
+                bm = bmesh.from_edit_mesh(mesh)
+                
+                if mode_state['selected_verts']:
+                    for index in mode_state['selected_verts']:
+                        if index < len(bm.verts):
+                            bm.verts[index].select = True
+                
+                if mode_state['selected_edges']:
+                    for index in mode_state['selected_edges']:
+                        if index < len(bm.edges):
+                            bm.edges[index].select = True
+                
+                if mode_state['selected_faces']:
+                    for index in mode_state['selected_faces']:
+                        if index < len(bm.faces):
+                            bm.faces[index].select = True
+                
+                bmesh.update_edit_mesh(mesh)
+            
+            elif mode == 'POSE':
+                armature = context.object
+                
+                # Ensure all bones are visible
+                for bone in armature.data.bones:
+                    bone.hide = False
+                
+                bpy.ops.pose.select_all(action='DESELECT')
+                
+                if mode_state['selected_bones']:
+                    for bone_name in mode_state['selected_bones']:
+                        if bone_name in armature.data.bones:
+                            armature.data.bones[bone_name].select = True
+            
+            elif mode == 'EDIT_ARMATURE':
+                armature = context.object
+                
+                # Ensure all bones are visible
                 for bone in armature.data.edit_bones:
                     bone.hide = False
                 
-                # Restore original bone selection
                 bpy.ops.armature.select_all(action='DESELECT')
-                for bone_name in state['selected_bones']:
-                    if bone_name in armature.data.edit_bones:
-                        armature.data.edit_bones[bone_name].select = True
-                        armature.data.edit_bones[bone_name].select_head = True
-                        armature.data.edit_bones[bone_name].select_tail = True
                 
-                state['active'] = False
-                self.report({'INFO'}, "Local isolate mode disabled (Armature Edit Mode)")
-        
-        else:
-            self.report({'WARNING'}, f"Local isolate not supported in {mode} mode")
-            return {'CANCELLED'}
+                if mode_state['selected_bones']:
+                    for bone_name in mode_state['selected_bones']:
+                        if bone_name in armature.data.edit_bones:
+                            armature.data.edit_bones[bone_name].select = True
+                            armature.data.edit_bones[bone_name].select_head = True
+                            armature.data.edit_bones[bone_name].select_tail = True
+            
+            self.report({'INFO'}, f"Local isolate mode disabled ({mode})")
         
         # Force viewport update
         for area in context.screen.areas:
@@ -253,7 +252,6 @@ class VIEW3D_OT_global_isolate(Operator):
     
     @classmethod
     def poll(cls, context):
-        # Check if feature is enabled in preferences
         try:
             prefs = context.preferences.addons[__name__].preferences
             return context.area.type == 'VIEW_3D' and prefs.enable_global_isolate
@@ -262,20 +260,18 @@ class VIEW3D_OT_global_isolate(Operator):
     
     def execute(self, context):
         mode = context.mode
+        state = isolate_states['GLOBAL']
+        mode_state = state[mode]
         
-        # OBJECT MODE
-        if mode == 'OBJECT':
-            state = isolate_states['GLOBAL']['OBJECT']
-            
-            if not state['active']:
-                # Get selected objects
+        if not state['active']:
+            # OBJECT MODE
+            if mode == 'OBJECT':
                 selected = [obj for obj in context.selected_objects]
                 if not selected:
                     self.report({'WARNING'}, "No objects selected")
                     return {'CANCELLED'}
                 
-                # Store selected objects (for later restoration)
-                state['selected_objects'] = selected.copy()
+                mode_state['selected_objects'] = selected.copy()
                 
                 # Store and hide unselected objects
                 hidden = []
@@ -285,52 +281,20 @@ class VIEW3D_OT_global_isolate(Operator):
                         obj.hide_viewport = True
                 
                 state['hidden_objects'] = hidden
-                state['active'] = True
-                self.report({'INFO'}, "Global isolate mode enabled (Object Mode)")
-            
-            else:
-                # Remember current selection before revealing
-                last_selected = [obj for obj in context.selected_objects]
                 
-                # Clear selection
-                bpy.ops.object.select_all(action='DESELECT')
-                
-                # Restore hidden objects
-                for obj in state['hidden_objects']:
-                    obj.hide_viewport = False
-                
-                # Restore original selection
-                for obj in state['selected_objects']:
-                    if obj and obj.name in bpy.data.objects:
-                        obj.select_set(True)
-                
-                # Set active object if possible
-                if state['selected_objects'] and state['selected_objects'][0]:
-                    context.view_layer.objects.active = state['selected_objects'][0]
-                
-                state['hidden_objects'] = []
-                state['active'] = False
-                self.report({'INFO'}, "Global isolate mode disabled (Object Mode)")
-        
-        # EDIT MESH MODE
-        elif mode == 'EDIT_MESH':
-            state = isolate_states['GLOBAL']['EDIT_MESH']
-            obj = context.edit_object
-            mesh = obj.data
-            
-            if not state['active']:
-                # Get the BMesh to access selection data
+            # EDIT MESH MODE
+            elif mode == 'EDIT_MESH':
+                obj = context.edit_object
+                mesh = obj.data
                 bm = bmesh.from_edit_mesh(mesh)
                 
-                # Store indices of selected elements based on current selection mode
-                state['selected_verts'] = [v.index for v in bm.verts if v.select]
-                state['selected_edges'] = [e.index for e in bm.edges if e.select]
-                state['selected_faces'] = [f.index for f in bm.faces if f.select]
+                mode_state['selected_verts'] = [v.index for v in bm.verts if v.select]
+                mode_state['selected_edges'] = [e.index for e in bm.edges if e.select]
+                mode_state['selected_faces'] = [f.index for f in bm.faces if f.select]
                 
-                # Hide unselected elements in current edit mesh
                 bpy.ops.mesh.hide(unselected=True)
                 
-                # Also hide all other objects in the scene (global isolation)
+                # Hide other objects
                 hidden = []
                 for scene_obj in context.view_layer.objects:
                     if scene_obj != obj and not scene_obj.hide_viewport:
@@ -338,69 +302,27 @@ class VIEW3D_OT_global_isolate(Operator):
                         scene_obj.hide_viewport = True
                 
                 state['hidden_objects'] = hidden
-                state['active'] = True
-                self.report({'INFO'}, "Global isolate mode enabled (Edit Mode)")
-            
-            else:
-                # Reveal all hidden elements in current mesh
-                bpy.ops.mesh.reveal()
                 
-                # First deselect everything
-                bpy.ops.mesh.select_all(action='DESELECT')
-                
-                # Get the BMesh to restore selection
-                bm = bmesh.from_edit_mesh(mesh)
-                
-                # Restore selection based on component indices
-                # For vertices
-                if state['selected_verts']:
-                    for index in state['selected_verts']:
-                        if index < len(bm.verts):
-                            bm.verts[index].select = True
-                
-                # For edges
-                if state['selected_edges']:
-                    for index in state['selected_edges']:
-                        if index < len(bm.edges):
-                            bm.edges[index].select = True
-                
-                # For faces
-                if state['selected_faces']:
-                    for index in state['selected_faces']:
-                        if index < len(bm.faces):
-                            bm.faces[index].select = True
-                
-                # Update the edit mesh
-                bmesh.update_edit_mesh(mesh)
-                
-                # Also restore all other objects in the scene
-                for scene_obj in state['hidden_objects']:
-                    scene_obj.hide_viewport = False
-                
-                state['hidden_objects'] = []
-                state['active'] = False
-                self.report({'INFO'}, "Global isolate mode disabled (Edit Mode)")
-        
-        # POSE MODE
-        elif mode == 'POSE':
-            state = isolate_states['GLOBAL']['POSE']
-            armature = context.object
-            
-            if not state['active']:
-                # Store selected bone names
+            # POSE MODE
+            elif mode == 'POSE':
+                armature = context.object
                 selected_bones = [bone.name for bone in armature.data.bones if bone.select]
                 if not selected_bones:
                     self.report({'WARNING'}, "No bones selected")
                     return {'CANCELLED'}
                 
-                state['selected_bones'] = selected_bones
+                mode_state['selected_bones'] = selected_bones
                 
-                # Hide unselected bones
+                # Store hidden bones state
+                hidden_bones = []
                 for bone in armature.data.bones:
                     if bone.name not in selected_bones:
+                        hidden_bones.append(bone.name)
                         bone.hide = True
                 
-                # Also hide all other objects in the scene (global isolation)
+                state['hidden_bones'] = hidden_bones
+                
+                # Hide other objects
                 hidden = []
                 for scene_obj in context.view_layer.objects:
                     if scene_obj != armature and not scene_obj.hide_viewport:
@@ -408,48 +330,27 @@ class VIEW3D_OT_global_isolate(Operator):
                         scene_obj.hide_viewport = True
                 
                 state['hidden_objects'] = hidden
-                state['active'] = True
-                self.report({'INFO'}, "Global isolate mode enabled (Pose Mode)")
-            
-            else:
-                # Unhide all bones
-                for bone in armature.data.bones:
-                    bone.hide = False
                 
-                # Restore original bone selection
-                bpy.ops.pose.select_all(action='DESELECT')
-                for bone_name in state['selected_bones']:
-                    if bone_name in armature.data.bones:
-                        armature.data.bones[bone_name].select = True
-                
-                # Also restore all other objects in the scene
-                for scene_obj in state['hidden_objects']:
-                    scene_obj.hide_viewport = False
-                
-                state['hidden_objects'] = []
-                state['active'] = False
-                self.report({'INFO'}, "Global isolate mode disabled (Pose Mode)")
-        
-        # EDIT ARMATURE MODE
-        elif mode == 'EDIT_ARMATURE':
-            state = isolate_states['GLOBAL']['EDIT_ARMATURE']
-            armature = context.object
-            
-            if not state['active']:
-                # Store selected bone names
+            # EDIT ARMATURE MODE
+            elif mode == 'EDIT_ARMATURE':
+                armature = context.object
                 selected_bones = [bone.name for bone in armature.data.edit_bones if bone.select]
                 if not selected_bones:
                     self.report({'WARNING'}, "No bones selected")
                     return {'CANCELLED'}
                 
-                state['selected_bones'] = selected_bones
+                mode_state['selected_bones'] = selected_bones
                 
-                # Hide unselected bones
+                # Store hidden bones state
+                hidden_bones = []
                 for bone in armature.data.edit_bones:
                     if bone.name not in selected_bones:
+                        hidden_bones.append(bone.name)
                         bone.hide = True
                 
-                # Also hide all other objects in the scene (global isolation)
+                state['hidden_bones'] = hidden_bones
+                
+                # Hide other objects
                 hidden = []
                 for scene_obj in context.view_layer.objects:
                     if scene_obj != armature and not scene_obj.hide_viewport:
@@ -457,39 +358,116 @@ class VIEW3D_OT_global_isolate(Operator):
                         scene_obj.hide_viewport = True
                 
                 state['hidden_objects'] = hidden
-                state['active'] = True
-                self.report({'INFO'}, "Global isolate mode enabled (Armature Edit Mode)")
             
-            else:
-                # Unhide all bones
+            state['active'] = True
+            self.report({'INFO'}, f"Global isolate mode enabled ({mode})")
+            
+        else:
+            # Call helper function to restore all hidden states
+            restore_unhidden_state(self, context, state)
+            
+            # Restore mode-specific selections
+            if mode == 'OBJECT':
+                bpy.ops.object.select_all(action='DESELECT')
+                if 'selected_objects' in mode_state:
+                    for obj in mode_state['selected_objects'][:]:
+                        try:
+                            if obj and obj.name in bpy.data.objects:
+                                obj.select_set(True)
+                        except ReferenceError:
+                            mode_state['selected_objects'].remove(obj)
+                    
+                    if mode_state['selected_objects'] and len(mode_state['selected_objects']) > 0:
+                        try:
+                            if mode_state['selected_objects'][0].name in bpy.data.objects:
+                                context.view_layer.objects.active = mode_state['selected_objects'][0]
+                        except ReferenceError:
+                            pass
+            
+            elif mode == 'EDIT_MESH':
+                obj = context.edit_object
+                mesh = obj.data
+                
+                bpy.ops.mesh.reveal()
+                bpy.ops.mesh.select_all(action='DESELECT')
+                
+                bm = bmesh.from_edit_mesh(mesh)
+                
+                if mode_state['selected_verts']:
+                    for index in mode_state['selected_verts']:
+                        if index < len(bm.verts):
+                            bm.verts[index].select = True
+                
+                if mode_state['selected_edges']:
+                    for index in mode_state['selected_edges']:
+                        if index < len(bm.edges):
+                            bm.edges[index].select = True
+                
+                if mode_state['selected_faces']:
+                    for index in mode_state['selected_faces']:
+                        if index < len(bm.faces):
+                            bm.faces[index].select = True
+                
+                bmesh.update_edit_mesh(mesh)
+            
+            elif mode == 'POSE':
+                armature = context.object
+                
+                # Ensure all bones are visible
+                for bone in armature.data.bones:
+                    bone.hide = False
+                
+                bpy.ops.pose.select_all(action='DESELECT')
+                
+                if mode_state['selected_bones']:
+                    for bone_name in mode_state['selected_bones']:
+                        if bone_name in armature.data.bones:
+                            armature.data.bones[bone_name].select = True
+            
+            elif mode == 'EDIT_ARMATURE':
+                armature = context.object
+                
+                # Ensure all bones are visible
                 for bone in armature.data.edit_bones:
                     bone.hide = False
                 
-                # Restore original bone selection
                 bpy.ops.armature.select_all(action='DESELECT')
-                for bone_name in state['selected_bones']:
-                    if bone_name in armature.data.edit_bones:
-                        armature.data.edit_bones[bone_name].select = True
-                        armature.data.edit_bones[bone_name].select_head = True
-                        armature.data.edit_bones[bone_name].select_tail = True
                 
-                # Also restore all other objects in the scene
-                for scene_obj in state['hidden_objects']:
-                    scene_obj.hide_viewport = False
-                
-                state['hidden_objects'] = []
-                state['active'] = False
-                self.report({'INFO'}, "Global isolate mode disabled (Armature Edit Mode)")
-        
-        else:
-            self.report({'WARNING'}, f"Global isolate not supported in {mode} mode")
-            return {'CANCELLED'}
+                if mode_state['selected_bones']:
+                    for bone_name in mode_state['selected_bones']:
+                        if bone_name in armature.data.edit_bones:
+                            armature.data.edit_bones[bone_name].select = True
+                            armature.data.edit_bones[bone_name].select_head = True
+                            armature.data.edit_bones[bone_name].select_tail = True
+            
+            self.report({'INFO'}, f"Global isolate mode disabled ({mode})")
         
         # Force viewport update
         for area in context.screen.areas:
             if area.type == 'VIEW_3D':
                 area.tag_redraw()
         
+        return {'FINISHED'}
+
+#----------------------------------------------------------------------------------
+# HOTKEY UPDATE OPERATOR
+#----------------------------------------------------------------------------------
+class ISOLATE_OT_update_hotkeys(Operator):
+    """Update the addon's hotkey settings"""
+    bl_idname = "isolate.update_hotkeys"
+    bl_label = "Update Hotkeys"
+    bl_options = {'REGISTER', 'INTERNAL'}
+    
+    def execute(self, context):
+        # Remove existing keymaps
+        for km, kmi in addon_keymaps:
+            km.keymap_items.remove(kmi)
+        addon_keymaps.clear()
+        
+        # Set up new keymaps
+        setup_keymaps()
+        
+        self.report({'INFO'}, "Hotkey settings updated successfully")
         return {'FINISHED'}
 
 #----------------------------------------------------------------------------------
@@ -646,23 +624,6 @@ class IsolateSelectPreferences(AddonPreferences):
         # Apply button for both
         layout.operator("isolate.update_hotkeys", text="Apply Hotkey Settings")
 
-class ISOLATE_OT_update_hotkeys(Operator):
-    """Apply both local and global hotkey settings"""
-    bl_idname = "isolate.update_hotkeys"
-    bl_label = "Apply Isolate Hotkey Settings"
-    
-    def execute(self, context):
-        # Remove existing hotkeys
-        for km, kmi in addon_keymaps:
-            km.keymap_items.remove(kmi)
-        addon_keymaps.clear()
-        
-        # Set up new hotkeys
-        setup_keymaps()
-        
-        self.report({'INFO'}, "Isolate hotkeys updated. If not working, try restarting Blender.")
-        return {'FINISHED'}
-
 #----------------------------------------------------------------------------------
 # PANEL
 #----------------------------------------------------------------------------------
@@ -691,12 +652,9 @@ class VIEW3D_PT_isolate_select(Panel):
             box = layout.box()
             col = box.column()
             
-            # Convert mode to dictionary key
-            mode_key = mode
-            
             # Show local isolation state if enabled
             if prefs.enable_local_isolate:
-                local_state = isolate_states['LOCAL'][mode_key]['active']
+                local_state = isolate_states['LOCAL']['active']
                 if local_state:
                     col.label(text="Local Isolation: Active", icon='CHECKMARK')
                 else:
@@ -704,7 +662,7 @@ class VIEW3D_PT_isolate_select(Panel):
                     
             # Show global isolation state if enabled
             if prefs.enable_global_isolate:
-                global_state = isolate_states['GLOBAL'][mode_key]['active']
+                global_state = isolate_states['GLOBAL']['active']
                 if global_state:
                     col.label(text="Global Isolation: Active", icon='CHECKMARK')
                 else:
@@ -728,11 +686,9 @@ def draw_items(self, context):
 #----------------------------------------------------------------------------------
 # KEYMAPS
 #----------------------------------------------------------------------------------
-# Store keymaps to remove when unregistering
 addon_keymaps = []
 
 def setup_keymaps():
-    # Add keymaps
     wm = bpy.context.window_manager
     kc = wm.keyconfigs.addon
     
